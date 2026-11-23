@@ -19,7 +19,7 @@ SemaphoreHandle_t VietnameseCurrencyExchangeRates::rateMutex = NULL;
 uint32_t VietnameseCurrencyExchangeRates::last_fetch_time = 0;
 bool VietnameseCurrencyExchangeRates::is_fetching = false;
 uint32_t VietnameseCurrencyExchangeRates::update_interval_ms = 30 * 60 * 1000; // 30 phút
-char VietnameseCurrencyExchangeRates::api_url[128] = "https://currency-rates.zaitan.workers.dev/";
+char VietnameseCurrencyExchangeRates::api_url[128] = "http://currency-rates.zaitan.workers.dev/";
 
 static void formatRateStr(int value, char *outStr, size_t maxLen) {
     if (value <= 0) {
@@ -140,39 +140,64 @@ static bool parseRatePayload(const String &payload, CurrencyExchangeInfo &outInf
 }
 
 static bool executeFetch(const char *url, CurrencyExchangeInfo &resultInfo) {
-    uint32_t maxAlloc = ESP.getMaxAllocHeap();
+    if (!url || strlen(url) == 0) return false;
+
     String payload = "";
     bool fetchSuccess = false;
-
-    // Kiểm tra heap cho TLS
-    const bool canUseTLS = (maxAlloc >= 25 * 1024);
-    if (!canUseTLS) {
-        VCE_LOG_W("Heap too fragmented for TLS: maxAlloc=%d", maxAlloc);
-        return false;
-    }
-
-    WiFiClientSecure client;
-    client.setInsecure();
-    client.setTimeout(8000);
+    bool isHttps = (strncmp(url, "https://", 8) == 0);
 
     HTTPClient http;
-    http.setTimeout(8000);
+    http.setTimeout(20000);
+    http.setConnectTimeout(20000);
     http.setUserAgent("ESP32-VietnameseCurrencyExchangeRates/1.0");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-    VCE_LOG_I("Fetching exchange rates from: %s", url);
-    if (http.begin(client, url)) {
-        int httpCode = http.GET();
-        if (httpCode == HTTP_CODE_OK) {
-            payload = http.getString();
-            fetchSuccess = true;
-            VCE_LOG_I("FX fetch OK, length: %d bytes", payload.length());
-        } else {
-            VCE_LOG_W("HTTP Error: %d", httpCode);
+    if (isHttps) {
+        uint32_t maxAlloc = ESP.getMaxAllocHeap();
+        if (maxAlloc < 15 * 1024) {
+            VCE_LOG_W("Heap too fragmented for TLS: maxAlloc=%d", maxAlloc);
+            return false;
         }
-        http.end();
+
+        WiFiClientSecure client;
+        client.setInsecure();
+        client.setTimeout(15);
+        static const char *alpn[] = {"http/1.1", NULL};
+        client.setAlpnProtocols(alpn);
+
+        VCE_LOG_I("Fetching exchange rates (HTTPS) from: %s", url);
+        if (http.begin(client, url)) {
+            int httpCode = http.GET();
+            if (httpCode == HTTP_CODE_OK) {
+                payload = http.getString();
+                fetchSuccess = true;
+                VCE_LOG_I("FX fetch OK, length: %d bytes", payload.length());
+            } else {
+                char errBuf[128] = {0};
+                client.lastError(errBuf, sizeof(errBuf));
+                VCE_LOG_W("HTTP Error: %d, TLS error: %s", httpCode, errBuf);
+            }
+            http.end();
+        }
+        client.stop();
+    } else {
+        WiFiClient client;
+        client.setTimeout(15);
+
+        VCE_LOG_I("Fetching exchange rates (HTTP) from: %s", url);
+        if (http.begin(client, url)) {
+            int httpCode = http.GET();
+            if (httpCode == HTTP_CODE_OK) {
+                payload = http.getString();
+                fetchSuccess = true;
+                VCE_LOG_I("FX fetch OK, length: %d bytes", payload.length());
+            } else {
+                VCE_LOG_W("HTTP Error: %d", httpCode);
+            }
+            http.end();
+        }
+        client.stop();
     }
-    client.stop();
 
     if (fetchSuccess && payload.length() > 0) {
         return parseRatePayload(payload, resultInfo);
@@ -236,7 +261,7 @@ void VietnameseCurrencyExchangeRates::update(bool wifiConnected, bool force, uin
         BaseType_t res = xTaskCreatePinnedToCore(
             fetchRateTask,
             "VnCurTask",
-            8 * 1024,
+            6 * 1024,
             NULL,
             1,
             NULL,

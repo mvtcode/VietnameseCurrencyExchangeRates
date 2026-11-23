@@ -40,7 +40,7 @@ private:
     static void fetchRateTask(void *param);
 
 public:
-    static void init(const char *endpoint = "https://currency-rates.zaitan.workers.dev/");
+    static void init(const char *endpoint = "http://currency-rates.zaitan.workers.dev/");
     static void setApiUrl(const char *url);
     static void setUpdateInterval(uint32_t intervalMinutes);
     static void update(bool wifiConnected, bool force = false, uint32_t intervalMinutes = 0);
