@@ -1,0 +1,40 @@
+{
+  "name": "VietnameseCurrencyExchangeRates",
+  "version": "1.0.0",
+  "description": "Thu vien cap nhat ty gia ngoai te (USD, EUR, JPY, GBP, CNY,...) gia Mua va gia Ban tai Viet Nam cho ESP32 va Arduino.",
+  "keywords": [
+    "vietnam",
+    "currency",
+    "exchange-rate",
+    "ty-gia",
+    "usd",
+    "eur",
+    "vietcombank",
+    "esp32",
+    "arduino"
+  ],
+  "authors": [
+    {
+      "name": "mvtcode",
+      "url": "https://github.com/mvtcode"
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mvtcode/VietnameseCurrencyExchangeRates.git"
+  },
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": {
+    "bblanchon/ArduinoJson": "^7.0.0"
+  },
+  "export": {
+    "include": [
+      "src/*",
+      "library.json",
+      "library.properties",
+      "README.md"
+    ]
+  }
+}
