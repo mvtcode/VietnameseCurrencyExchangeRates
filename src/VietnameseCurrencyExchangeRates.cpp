@@ -19,11 +19,12 @@ SemaphoreHandle_t VietnameseCurrencyExchangeRates::rateMutex = NULL;
 uint32_t VietnameseCurrencyExchangeRates::last_fetch_time = 0;
 bool VietnameseCurrencyExchangeRates::is_fetching = false;
 uint32_t VietnameseCurrencyExchangeRates::update_interval_ms = 30 * 60 * 1000; // 30 phút
-char VietnameseCurrencyExchangeRates::api_url[128] = "http://currency-rates.zaitan.workers.dev/";
+char VietnameseCurrencyExchangeRates::api_url[128] = "https://currency-rates.zaitan.workers.dev/";
 
 static void formatRateStr(int value, char *outStr, size_t maxLen) {
     if (value <= 0) {
         strncpy(outStr, "--", maxLen - 1);
+        outStr[maxLen - 1] = '\0';
         return;
     }
     // Định dạng gọn gàng: 25580 -> "25.580" (dấu chấm 1px trên LED matrix)
@@ -32,109 +33,135 @@ static void formatRateStr(int value, char *outStr, size_t maxLen) {
     } else {
         snprintf(outStr, maxLen, "%d", value);
     }
+    outStr[maxLen - 1] = '\0';
 }
 
-static void parseCurrencyObject(JsonObject obj, const char *code, CurrencyRate &outRate) {
-    strncpy(outRate.code, code, sizeof(outRate.code) - 1);
-    outRate.code[sizeof(outRate.code) - 1] = '\0';
+static String extractJsonString(const String &json, int startPos, const char *key) {
+    String searchKey = "\"" + String(key) + "\":";
+    int keyIdx = json.indexOf(searchKey, startPos);
+    if (keyIdx == -1) return "";
 
-    int buyVal = obj["buy"] | 0;
-    int sellVal = obj["sell"] | (obj["rate"] | 0);
+    int startQuote = json.indexOf('"', keyIdx + searchKey.length());
+    if (startQuote == -1) return "";
 
-    if (buyVal > 0) {
-        outRate.buy = buyVal;
-        outRate.has_buy = true;
-        formatRateStr(buyVal, outRate.buy_str, sizeof(outRate.buy_str));
-    } else {
-        outRate.buy = 0;
-        outRate.has_buy = false;
-        outRate.buy_str[0] = '\0';
+    int endQuote = json.indexOf('"', startQuote + 1);
+    if (endQuote == -1) return "";
+
+    return json.substring(startQuote + 1, endQuote);
+}
+
+static int extractJsonInt(const String &json, int startPos, const char *key) {
+    String searchKey = "\"" + String(key) + "\":";
+    int keyIdx = json.indexOf(searchKey, startPos);
+    if (keyIdx == -1) return 0;
+
+    int valStart = keyIdx + searchKey.length();
+    while (valStart < (int)json.length() && (json[valStart] == ' ' || json[valStart] == '\t')) {
+        valStart++;
     }
 
-    if (sellVal > 0) {
-        outRate.sell = sellVal;
-        outRate.has_sell = true;
-        formatRateStr(sellVal, outRate.sell_str, sizeof(outRate.sell_str));
-    } else {
-        outRate.sell = 0;
-        outRate.has_sell = false;
-        outRate.sell_str[0] = '\0';
+    int valEnd = valStart;
+    while (valEnd < (int)json.length() && (isdigit(json[valEnd]) || json[valEnd] == '-')) {
+        valEnd++;
     }
+
+    if (valStart < valEnd) {
+        return json.substring(valStart, valEnd).toInt();
+    }
+    return 0;
 }
 
 static bool parseRatePayload(const String &payload, CurrencyExchangeInfo &outInfo) {
     if (payload.length() == 0) return false;
 
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
-    if (error) {
-        VCE_LOG_E("JSON parse failed: %s", error.c_str());
-        return false;
-    }
-
     bool parsed = false;
     outInfo.count = 0;
 
     // 1. Kiểm tra trường "usd" hoặc "USD"
-    if (doc["usd"].is<JsonObject>()) {
-        parseCurrencyObject(doc["usd"].as<JsonObject>(), "USD", outInfo.usd);
-        parsed = true;
-    } else if (doc["USD"].is<JsonObject>()) {
-        parseCurrencyObject(doc["USD"].as<JsonObject>(), "USD", outInfo.usd);
-        parsed = true;
-    } else if (doc["buy"].is<int>() || doc["sell"].is<int>()) {
-        // Cấu trúc phẳng root { buy: 25580, sell: 25990 }
-        parseCurrencyObject(doc.as<JsonObject>(), "USD", outInfo.usd);
-        parsed = true;
-    } else if (doc["rates"].is<JsonObject>()) {
-        // Fallback OpenExchangeRates { rates: { VND: 25779 } }
-        int v = (int)round(doc["rates"]["VND"] | 0.0f);
-        if (v > 0) {
-            strncpy(outInfo.usd.code, "USD", sizeof(outInfo.usd.code) - 1);
-            outInfo.usd.sell = v;
-            outInfo.usd.has_sell = true;
-            formatRateStr(v, outInfo.usd.sell_str, sizeof(outInfo.usd.sell_str));
-            parsed = true;
-        }
-    }
+    int usdIdx = payload.indexOf("\"usd\":");
+    if (usdIdx == -1) usdIdx = payload.indexOf("\"USD\":");
 
-    // Luôn lưu USD vào vị trí đầu tiên của mảng currencies
-    if (parsed) {
+    if (usdIdx != -1) {
+        int buy = extractJsonInt(payload, usdIdx, "buy");
+        int sell = extractJsonInt(payload, usdIdx, "sell");
+        String buyStr = extractJsonString(payload, usdIdx, "buy_str");
+        String sellStr = extractJsonString(payload, usdIdx, "sell_str");
+
+        strncpy(outInfo.usd.code, "USD", sizeof(outInfo.usd.code) - 1);
+        outInfo.usd.code[sizeof(outInfo.usd.code) - 1] = '\0';
+        outInfo.usd.buy = buy;
+        outInfo.usd.sell = sell;
+        outInfo.usd.has_buy = (buy > 0);
+        outInfo.usd.has_sell = (sell > 0);
+
+        if (buyStr.length() > 0) {
+            strncpy(outInfo.usd.buy_str, buyStr.c_str(), sizeof(outInfo.usd.buy_str) - 1);
+        } else {
+            formatRateStr(buy, outInfo.usd.buy_str, sizeof(outInfo.usd.buy_str));
+        }
+        if (sellStr.length() > 0) {
+            strncpy(outInfo.usd.sell_str, sellStr.c_str(), sizeof(outInfo.usd.sell_str) - 1);
+        } else {
+            formatRateStr(sell, outInfo.usd.sell_str, sizeof(outInfo.usd.sell_str));
+        }
+        outInfo.usd.buy_str[sizeof(outInfo.usd.buy_str) - 1] = '\0';
+        outInfo.usd.sell_str[sizeof(outInfo.usd.sell_str) - 1] = '\0';
+
         outInfo.currencies[0] = outInfo.usd;
         outInfo.count = 1;
+        parsed = true;
     }
 
-    // 2. Bóc tách danh mục currencies nếu có { "currencies": { "EUR": {...}, "JPY": {...} } }
-    JsonObject currObj;
-    if (doc["currencies"].is<JsonObject>()) {
-        currObj = doc["currencies"].as<JsonObject>();
-    } else if (doc["data"].is<JsonObject>()) {
-        currObj = doc["data"].as<JsonObject>();
-    }
+    // 2. Parse các đồng tiền phổ biến: EUR, JPY, GBP, CNY, SGD, AUD, CAD, KRW
+    const char *commonCodes[] = {"EUR", "JPY", "GBP", "CNY", "SGD", "AUD", "CAD", "KRW"};
+    for (size_t i = 0; i < sizeof(commonCodes) / sizeof(commonCodes[0]); i++) {
+        if (outInfo.count >= MAX_CURRENCIES) break;
+        const char *cCode = commonCodes[i];
+        String key = "\"" + String(cCode) + "\":";
+        int cIdx = payload.indexOf(key);
+        if (cIdx != -1) {
+            int buy = extractJsonInt(payload, cIdx, "buy");
+            int sell = extractJsonInt(payload, cIdx, "sell");
+            String buyStr = extractJsonString(payload, cIdx, "buy_str");
+            String sellStr = extractJsonString(payload, cIdx, "sell_str");
 
-    if (!currObj.isNull()) {
-        for (JsonPair kv : currObj) {
-            if (outInfo.count >= MAX_CURRENCIES) break;
-
-            const char *cCode = kv.key().c_str();
-            // Nếu là USD thì đã xử lý ở trên rồi, bỏ qua tránh trùng lặp
-            if (strcasecmp(cCode, "USD") == 0) continue;
-
-            if (kv.value().is<JsonObject>()) {
+            if (buy > 0 || sell > 0) {
                 CurrencyRate &cr = outInfo.currencies[outInfo.count];
-                parseCurrencyObject(kv.value().as<JsonObject>(), cCode, cr);
-                if (cr.buy > 0 || cr.sell > 0) {
-                    outInfo.count++;
+                strncpy(cr.code, cCode, sizeof(cr.code) - 1);
+                cr.code[sizeof(cr.code) - 1] = '\0';
+                cr.buy = buy;
+                cr.sell = sell;
+                cr.has_buy = (buy > 0);
+                cr.has_sell = (sell > 0);
+
+                if (buyStr.length() > 0) {
+                    strncpy(cr.buy_str, buyStr.c_str(), sizeof(cr.buy_str) - 1);
+                } else {
+                    formatRateStr(buy, cr.buy_str, sizeof(cr.buy_str));
                 }
+                if (sellStr.length() > 0) {
+                    strncpy(cr.sell_str, sellStr.c_str(), sizeof(cr.sell_str) - 1);
+                } else {
+                    formatRateStr(sell, cr.sell_str, sizeof(cr.sell_str));
+                }
+                cr.buy_str[sizeof(cr.buy_str) - 1] = '\0';
+                cr.sell_str[sizeof(cr.sell_str) - 1] = '\0';
+                outInfo.count++;
             }
         }
     }
 
-    const char *src = doc["source"] | "Vietcombank";
-    strncpy(outInfo.source, src, sizeof(outInfo.source) - 1);
+    String src = extractJsonString(payload, 0, "source");
+    if (src.length() > 0) {
+        strncpy(outInfo.source, src.c_str(), sizeof(outInfo.source) - 1);
+        outInfo.source[sizeof(outInfo.source) - 1] = '\0';
+    }
 
-    const char *updated = doc["updated_at"] | "";
-    strncpy(outInfo.updated_time, updated, sizeof(outInfo.updated_time) - 1);
+    String updated = extractJsonString(payload, 0, "updated_at");
+    if (updated.length() > 0) {
+        strncpy(outInfo.updated_time, updated.c_str(), sizeof(outInfo.updated_time) - 1);
+        outInfo.updated_time[sizeof(outInfo.updated_time) - 1] = '\0';
+    }
 
     return parsed;
 }
@@ -147,9 +174,9 @@ static bool executeFetch(const char *url, CurrencyExchangeInfo &resultInfo) {
     bool isHttps = (strncmp(url, "https://", 8) == 0);
 
     HTTPClient http;
-    http.setTimeout(20000);
-    http.setConnectTimeout(20000);
-    http.setUserAgent("ESP32-VietnameseCurrencyExchangeRates/1.0");
+    http.setTimeout(15000);
+    http.setConnectTimeout(15000);
+    http.setUserAgent("ESP32-CYD-Updater");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
     if (isHttps) {
@@ -161,9 +188,7 @@ static bool executeFetch(const char *url, CurrencyExchangeInfo &resultInfo) {
 
         WiFiClientSecure client;
         client.setInsecure();
-        client.setTimeout(15);
-        static const char *alpn[] = {"http/1.1", NULL};
-        client.setAlpnProtocols(alpn);
+        client.setTimeout(15000);
 
         VCE_LOG_I("Fetching exchange rates (HTTPS) from: %s", url);
         if (http.begin(client, url)) {
@@ -182,7 +207,7 @@ static bool executeFetch(const char *url, CurrencyExchangeInfo &resultInfo) {
         client.stop();
     } else {
         WiFiClient client;
-        client.setTimeout(15);
+        client.setTimeout(15000);
 
         VCE_LOG_I("Fetching exchange rates (HTTP) from: %s", url);
         if (http.begin(client, url)) {
@@ -229,17 +254,20 @@ void VietnameseCurrencyExchangeRates::setUpdateInterval(uint32_t intervalMinutes
 }
 
 void VietnameseCurrencyExchangeRates::fetchRateTask(void *param) {
-    CurrencyExchangeInfo info;
-    if (executeFetch(api_url, info)) {
-        if (rateMutex != NULL && xSemaphoreTake(rateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-            info.is_valid = true;
-            info.last_update_time = millis();
-            current_info = info;
-            xSemaphoreGive(rateMutex);
-            VCE_LOG_I("Exchange rates updated successfully: USD Buy=%s, Sell=%s", info.usd.buy_str, info.usd.sell_str);
+    CurrencyExchangeInfo *info = new CurrencyExchangeInfo();
+    if (info) {
+        if (executeFetch(api_url, *info)) {
+            if (rateMutex != NULL && xSemaphoreTake(rateMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+                info->is_valid = true;
+                info->last_update_time = millis();
+                current_info = *info;
+                xSemaphoreGive(rateMutex);
+                VCE_LOG_I("Exchange rates updated successfully: USD Buy=%s, Sell=%s", info->usd.buy_str, info->usd.sell_str);
+            }
+        } else {
+            VCE_LOG_W("Fetch exchange rates failed");
         }
-    } else {
-        VCE_LOG_W("Fetch exchange rates failed");
+        delete info;
     }
     is_fetching = false;
     vTaskDelete(NULL);
@@ -261,7 +289,7 @@ void VietnameseCurrencyExchangeRates::update(bool wifiConnected, bool force, uin
         BaseType_t res = xTaskCreatePinnedToCore(
             fetchRateTask,
             "VnCurTask",
-            6 * 1024,
+            8 * 1024,
             NULL,
             1,
             NULL,
